@@ -1,5 +1,6 @@
 #include <iostream>
 #include <Windows.h>
+#include <memory>
 
 #include<d3d9.h>
 #include<d3dx9.h>
@@ -49,10 +50,10 @@ DWORD hackMain(HMODULE hModule)
 
 	DWORD shaderAPIBase = (DWORD)GetModuleHandle("shaderapidx9.dll");
 
-	IDirect3DDevice9* d3d9device = *(IDirect3DDevice9**)(shaderAPIBase + dwppDirect3DDevice9);	//If you use a detour or trampoline hook, then the dummy device method is the way to go. A plain VMT hook works if you know where the device is. 
+	IDirect3DDevice9* d3d9device = *(IDirect3DDevice9**)(shaderAPIBase + dwppDirect3DDevice9); //If you use a detour or trampoline hook, then the dummy device method is the way to go. A plain VMT hook works if you know where the device is. 
 
 	DWORD** d3d9Vtable = (DWORD**)d3d9device;
-	VMTHook* d3d9DeviceHook = new VMTHook(d3d9Vtable);	//Get vtable from d3d9 device and use it to initialize our VMT hook instance
+	std::unique_ptr<VMTHook> d3d9DeviceHook = std::make_unique<VMTHook>(d3d9Vtable); //Get vtable from d3d9 device and use it to initialize our VMT hook instance
 
 	originalEndScene = (EndSceneFn)d3d9DeviceHook->Hook((DWORD)hookedEndScene, 42);	//Pass through address of our hooked method - and the VMT index of EndScene, which is 42.
 	if (!originalEndScene)
@@ -72,7 +73,6 @@ DWORD hackMain(HMODULE hModule)
 
 
 	d3d9DeviceHook->UnHook(); //Unhook and delete our VMT hook instance before we quit, otherwise CSGO will crash
-	delete d3d9DeviceHook;
 
 	Sleep(1000);
 	FreeLibraryAndExitThread(hModule, 0);
@@ -83,6 +83,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
 {
 	DisableThreadLibraryCalls(hModule);
 	if (fdwReason == DLL_PROCESS_ATTACH)
-		CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)hackMain, hModule, 0, nullptr);	//run hackMain where we will do d3d9 hook
+		if (const auto threadHandle = CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)hackMain, hModule, 0, nullptr)) //run hackMain where we will do d3d9 hook
+			CloseHandle(threadHandle);
 	return TRUE;
 }
