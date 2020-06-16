@@ -8,6 +8,7 @@
 #pragma comment(lib,"d3dx9.lib")
 
 #include "VMTHook.h"
+#include "TrampolineHook.h"
 
 //Simple text drawing with d3dx9
 ID3DXFont* font = nullptr;
@@ -44,22 +45,72 @@ void APIENTRY hookedEndScene(IDirect3DDevice9* pDevice)
 
 DWORD hackMain(HMODULE hModule)
 {
+
+	bool doTrampolineHook = true;
+	std::unique_ptr<VMTHook> d3d9devVMTHook;
+	std::unique_ptr<TrampolineHook> d3d9devTrampHook;
+	IDirect3DDevice9* d3d9device = nullptr;
+
 	HWND csgoHwnd = FindWindow(NULL, "Counter-Strike: Global Offensive");	//There are better ways of finding the hwnd that CSGO uses, but this is simple enough. Should probably be in windowed mode to inject or this may fail^^
 
-	DWORD dwppDirect3DDevice9 = 0xA7030;	//You may want to sigscan this or update the offset. Signatures and offsets can be found in hazedumper on github
-
-	DWORD shaderAPIBase = (DWORD)GetModuleHandle("shaderapidx9.dll");
-
-	IDirect3DDevice9* d3d9device = *(IDirect3DDevice9**)(shaderAPIBase + dwppDirect3DDevice9); //If you use a detour or trampoline hook, then the dummy device method is the way to go. A plain VMT hook works if you know where the device is. 
-
-	DWORD** d3d9Vtable = (DWORD**)d3d9device;
-	std::unique_ptr<VMTHook> d3d9DeviceHook = std::make_unique<VMTHook>(d3d9Vtable); //Get vtable from d3d9 device and use it to initialize our VMT hook instance
-
-	originalEndScene = (EndSceneFn)d3d9DeviceHook->Hook((DWORD)hookedEndScene, 42);	//Pass through address of our hooked method - and the VMT index of EndScene, which is 42.
-	if (!originalEndScene)
+	//todo: refactor this if statement - most likely a better way of doing this
+	if (doTrampolineHook)
 	{
-		MessageBoxA(NULL, "Failed to hook EndScene.. ", "Error", MB_ICONERROR | MB_OK);
-		FreeLibraryAndExitThread(hModule, -1);
+		IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+		if (!d3d)
+		{
+			MessageBoxA(NULL, "Failed to init D3D9.. ", "Error", MB_ICONERROR | MB_OK);
+			FreeLibraryAndExitThread(hModule, -1);
+		}
+
+		D3DPRESENT_PARAMETERS presentParams = {};
+		presentParams.hDeviceWindow = csgoHwnd;
+		presentParams.SwapEffect = D3DSWAPEFFECT_DISCARD;
+		presentParams.Windowed = FALSE;
+
+		HRESULT result = d3d->CreateDevice(NULL, D3DDEVTYPE_HAL, csgoHwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &presentParams, &d3d9device);
+		if (FAILED(result))
+		{
+			presentParams.Windowed = !presentParams.Windowed;
+			result = d3d->CreateDevice(NULL, D3DDEVTYPE_HAL, csgoHwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &presentParams, &d3d9device);
+			if (FAILED(result))
+			{
+				MessageBoxA(NULL, "Error creating d3d9 device - game window may be minimized", "Error", MB_ICONERROR | MB_OK);
+				FreeLibraryAndExitThread(hModule, -1);
+			}
+		}
+
+		//todo: move obtaining vtable indices into TrampolineHook class
+		DWORD* d3d9Vtable = *(DWORD**)d3d9device;
+		DWORD endSceneFnPtr = d3d9Vtable[42];
+
+		d3d9devTrampHook = std::make_unique<TrampolineHook>((uintptr_t)endSceneFnPtr , (uintptr_t)hookedEndScene,7);	//Prologue of EndScene is 7 bytes otherwise we cut through instructions. Prologue can be calculated using IDA or similar
+		originalEndScene = (EndSceneFn)d3d9devTrampHook->getGatewayAddress();
+		if (!originalEndScene)
+		{
+			MessageBoxA(NULL, "Failed to trampoline hook EndScene", "Error", MB_ICONERROR | MB_OK);
+			FreeLibraryAndExitThread(hModule, -1);
+		}
+
+		d3d->Release();
+		d3d9device->Release();
+	}
+	else
+	{
+		DWORD dwppDirect3DDevice9 = 0xA7030;	//You may want to sigscan this or update the offset. Signatures and offsets can be found in hazedumper on github
+		DWORD shaderAPIBase = (DWORD)GetModuleHandle("shaderapidx9.dll");
+
+		d3d9device = *(IDirect3DDevice9**)(shaderAPIBase + dwppDirect3DDevice9); //If you use a detour or trampoline hook, then the dummy device method is the way to go. A plain VMT hook works if you know where the device is. 
+
+		DWORD** d3d9Vtable = (DWORD**)d3d9device;
+		//std::unique_ptr<VMTHook> d3d9DeviceHook = std::make_unique<VMTHook>(d3d9Vtable); //Get vtable from d3d9 device and use it to initialize our VMT hook instance
+		d3d9devVMTHook = std::make_unique<VMTHook>(d3d9Vtable);
+		originalEndScene = (EndSceneFn)d3d9devVMTHook->Hook((DWORD)hookedEndScene, 42);	//Pass through address of our hooked method - and the VMT index of EndScene, which is 42.
+		if (!originalEndScene)
+		{
+			MessageBoxA(NULL, "Failed to hook EndScene.. ", "Error", MB_ICONERROR | MB_OK);
+			FreeLibraryAndExitThread(hModule, -1);
+		}
 	}
 
 	bool shouldQuit = false;
@@ -71,8 +122,10 @@ DWORD hackMain(HMODULE hModule)
 			shouldQuit = true;
 	}
 
-
-	d3d9DeviceHook->UnHook(); //Unhook and delete our VMT hook instance before we quit, otherwise CSGO will crash
+	if (doTrampolineHook)
+		d3d9devTrampHook->UnHook();
+	else
+		d3d9devVMTHook->UnHook();
 
 	Sleep(1000);
 	FreeLibraryAndExitThread(hModule, 0);

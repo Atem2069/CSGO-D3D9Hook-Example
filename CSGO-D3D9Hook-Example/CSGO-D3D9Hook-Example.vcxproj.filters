@@ -23,5 +23,8 @@
     <ClInclude Include="VMTHook.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="TrampolineHook.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
